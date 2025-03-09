@@ -1,0 +1,729 @@
+---
+title: "The value of progress feedback in effrort-based decision-making"
+output: word_document
+---
+
+```{r setup, message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(ggbeeswarm)
+library(ggpubr)
+library(ggsignif)
+library(RColorBrewer)
+library(lme4)
+library(lmeresampler)
+library(tidyr)
+library(modelr)
+library(plotly)
+library(equatiomatic)
+library(vtable)
+library(lmerTest)
+library(boot)
+library(papaja)
+library(broom.mixed)
+library(e1071)
+library(knitr)
+library(kableExtra)
+
+CurrentSourceWD<-dirname(rstudioapi::getSourceEditorContext()$path)
+setwd(CurrentSourceWD)
+
+source('helperRfunctions.R') #homemade functions (for plotting), all in one place
+
+# Function to calculate the mean for bootstrapping
+mean_func <- function(data, indices) {
+  d <- data[indices]
+  return(mean(d))
+}
+mean_centre_this <- function(x){
+  mean_subtracted<- x - mean(x,na.rm=T)
+  return(mean_subtracted)
+}
+TwoWayLineSEsum<-function(din,Xvar,Yvar,GroupVar,
+                          Xlabel=Xvar,Ylabel=Yvar,
+                          setTitle=" ",
+                          setLegendTitle = GroupVar,
+                          na_rm_before_print = T,
+                          na_omit_on = F,
+                          Xrotate = 90,
+                          shapeSet = c(16, 1),#default, solid vs hollow circles
+                          setAxis = list(),...){
+  #general function, like ggline
+  #have line between means and error bars over them
+  #statistical summary done with mean & SE, not bootstrap CI
+  #outputs warning to what rows are not plotted
+  #upgraded Jun 2024 to also separate condition GroupVars by shape
+  
+  if(na_omit_on){
+    sumdf <- din %>% 
+      group_by(.data[[Xvar]],.data[[GroupVar]],
+               .drop = FALSE) %>% #drop = FALSE
+      summarize(meanVar = mean(na.omit(.data[[Yvar]])), 
+                #seVar = sd(na.omit(.data[[Yvar]])) / sqrt(n()),
+                seVar = sd(na.omit(.data[[Yvar]])) / sqrt(sum(!is.na(.data[[Yvar]]))),
+                .groups = "drop")
+    #n() includes NaN, so should do the same as e.g., nanstd(tac_non(isGPat, :))./sqrt(sum(isGPat))
+  }else{
+    sumdf <- din %>% 
+      group_by(.data[[Xvar]],.data[[GroupVar]]) %>% 
+      summarize(meanVar = mean(.data[[Yvar]]), 
+                seVar = sd(.data[[Yvar]]) / sqrt(n()),
+                .groups = "drop")
+    #.groups specified to avoid annoying warning; no grouping left in the sumdf
+  }
+  
+  #clean up sumdf before going into ggplot
+  if(na_rm_before_print){
+    old_rows<-nrow(sumdf)
+    sumdf<-sumdf[!(is.na(sumdf$meanVar) | is.na(sumdf$seVar)),]
+    new_rows<-nrow(sumdf)
+    n_deleted <- old_rows-new_rows
+    if(n_deleted>0){
+      warning(sprintf("means and SE of NA removed before plotting; %i rows gone", n_deleted))
+    }
+  }
+  
+  #actual plot
+  aus<-ggplot(sumdf, 
+              aes(x = .data[[Xvar]], y = meanVar, color = .data[[GroupVar]],
+                  shape = .data[[GroupVar]])) +
+    geom_point() + geom_line(aes(group = .data[[GroupVar]])) +
+    geom_errorbar(aes(ymin = meanVar - seVar, ymax = meanVar + seVar), width = 0.02) +
+    labs(title = setTitle,
+         x = Xlabel, 
+         y = Ylabel,
+         color = setLegendTitle,shape = setLegendTitle)+
+    theme_classic()+
+    theme(plot.title = element_text(hjust = 0.5),
+          axis.text.x = element_text(angle = Xrotate, vjust = 0.5, hjust=1), #to rotate the x label, which were long
+          legend.position = "right")+
+    scale_shape_manual(values = shapeSet) 
+  
+  #add features to plot (axis limits)
+  if("y" %in% names(setAxis)){
+    aus<-aus+scale_y_continuous(limits = setAxis$y)
+  }
+  if("x" %in% names(setAxis)){
+    aus<-aus+scale_x_discrete(limits = setAxis$x)
+  }
+  if("colourSet" %in% names(list(...))){
+    colourSet <- list(...)$colourSet
+    aus<-aus+scale_color_brewer(palette = colourSet)
+  }
+  
+  return(aus)
+}
+theme_set(theme_classic()+theme(text = element_text(size = 18)))
+```
+
+IMPORTANT DEVIATION FROM PRE-REGISTRATION:
+-Some PSE unrealistic; not considered within-prereg... these people will be excluded for all analysis
+-However, we will report results from the PSE-related hypothesis that DO have those participants 
+
+Load the cleaned-up data with extra variables calculated:
+! The Naming notations !
+-mega = table with all trials from the 114 participants (implausible PSE excluded)
+-dptp = table with participant-level data with 
+-mega_pre = table with all trials from all 120 participants; 
+-dptp_pre = participant-level table, with the pre-registered exclusion (so n=120)
+```{r}
+load("data/Exp2megatable_final.RData") #gets mega
+
+#get the pre-registered exclusion
+keep<-read.csv('data/keep_effort_not_failed.csv')
+keep<-keep$x
+
+#also: add dptp to mega
+dptp<-read.csv("data/Exp2_PtpVarTable_full.csv")
+dmod<-read.csv("data/exp2_BICtable.csv") #for modelling
+dptp <-left_join(dptp,dmod,by="prolific_id")
+```
+
+```{r}
+dptp_sel <- dplyr::select(dptp,prolific_id,
+                          CursorControl,Handedness,eqpoint)
+#get the additional exclusion (deviating from pre-reg due to implausible values)
+excluPSEs<-dptp$prolific_id[!(dptp$eqpoint<0.5 & dptp$eqpoint> -0.5)]
+write.csv(data.frame(excluPSEs),'data/exclu_PSEs.csv')
+
+#IMPORTANT: implement exclusion here
+mega$prolific_id<-factor(mega$prolific_id)
+mega<-mega[mega$prolific_id %in% keep,]
+mega<-merge(mega,dptp_sel,by="prolific_id")
+```
+
+```{r}
+# Brief Data Wrangling
+mega<-mega %>% mutate(effort_type = recode(as.numeric(progress_shown),
+                                           `1` = "with-progress", `0`="no-progress"))
+  #alright mutate/recode cannot into `TRUE` for logical...
+mega$effort_type<-factor(mega$effort_type,
+                         levels = c("no-progress","with-progress")) #so no-progress will look red, more intuitive
+
+the_equal_levels<-unique(mega$ChosenEffortLevel[mega$ChoseRef==1])
+
+#label the trials across each chain
+mega$trial_in_chain<-NA
+mega$chain_ind <- mega$record_currentChain+1
+for(t in 1:nrow(mega)){
+  if(mega$trialn[t]==1){
+    tC = c(0,0,0)
+  }
+  tC[mega$chain_ind[t]]=tC[mega$chain_ind[t]]+1
+  mega$trial_in_chain[t] = tC[mega$chain_ind[t]]
+}
+
+# there should be NO additional column definitions beyond this point!!!
+```
+
+Addition: metrics relating to failures...
+```{r}
+failSum<-mega %>% 
+  group_by(prolific_id, progress_shown) %>% #for each effort type
+  summarise(fail_rate = mean(1-isGoalReached))
+
+#make into wide format so as to merge with dptp
+failSum_wide = failSum %>% 
+  pivot_wider(names_from = progress_shown,
+              names_prefix = "fail_rate_progress_shown",
+              values_from = fail_rate,
+              values_fill = 0) #important to get the empty cells to be 0?
+
+#calculate difference 
+failSum_wide$no_progress_effect_on_fail = failSum_wide$fail_rate_progress_shownFALSE-failSum_wide$fail_rate_progress_shownTRUE
+
+dptp<-merge(dptp,failSum_wide,by="prolific_id")
+```
+
+Finally, where the multiversing of with or without the excluPSEs diverge:
+```{r}
+mega_pre <- mega
+mega <- mega[!(mega$prolific_id %in% excluPSEs),]
+dptp_pre <- dptp
+dptp <- dptp[!(dptp$prolific_id %in% excluPSEs),]
+```
+
+# Demographics - commented out due to display issue in word
+```{r}
+#table(dptp$Sex)
+#sumtable(dptp,vars=c('Age','Sex','Handedness','CursorControl'))
+```
+
+# Effort Preferences
+```{r}
+effSum<-mega %>% 
+  group_by(dOffer) %>% 
+  summarize(pChooseRef = mean(ChoseRef==1),
+            n_data = n())
+choice_dEff<-mega %>% 
+  group_by(prolific_id,dOffer) %>% 
+  summarize(pChooseRef = mean(ChoseRef==1))
+```
+
+```{r}
+levels2keep1<-names(table(effSum$dOffer[effSum$n_data>20]))
+levels2keep<-as.numeric(levels2keep1)
+
+fig2b<-ggplot(choice_dEff[choice_dEff$dOffer %in% levels2keep,], 
+              aes(x = dOffer, y = pChooseRef,color = prolific_id)) +
+  geom_line(aes(group = prolific_id),
+            #color = "grey",
+            alpha=0.12) +
+  stat_summary(fun.data = mean_cl_boot, 
+               shape = 21, fill = "white", #this is to make the stat summary hollow
+               size = 0.8,
+               color= "black")+
+  labs(title = " ", 
+       x = "△effort", 
+       y = "p(Choose PF+)")+
+  theme_classic()+
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "none")+theme(text = element_text(size = 16))
+fig2b
+```
+
+H1a:
+```{r}
+summary(H1a<-glmer(ChoseRef~1+(1|prolific_id),mega[mega$dOffer==0,],family=binomial))
+
+#get the odds ratio and 
+tidy(H1a,conf.int=TRUE,exponentiate=TRUE,effects="fixed")
+```
+
+Following up on H1a: at the individual level
+```{r}
+atEq<-choice_dEff[choice_dEff$dOffer==0,]
+mean(atEq$pChooseRef<0.5)
+mean(atEq$pChooseRef==1)
+```
+
+Get fig2a and combine with fig2b
+```{r}
+fig2a<-ggplot(atEq,aes(pChooseRef))+
+  geom_histogram(binwidth = 0.1)+
+  labs(title = " ", 
+     x = "Probability of choosing PF+ at △effort = 0", 
+     y = "Number of participants")+
+  theme_classic()+
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "none")+theme(text = element_text(size = 16))
+ggarrange(fig2a,fig2b,labels = c("A","B"),nrow=2)
+ggsave('figs/effort_preference.jpg',width=7.29,height=9.0)
+```
+
+H1b: model comparison
+```{r}
+#BIC table:
+BICtable<-colMeans(dptp[,c("additive_lapse", "effmin_lapse", "additive_nolps", "effmin_nolps","choice_kernel")])
+BICtable
+BICtable["additive_nolps"]-BICtable["effmin_nolps"]
+```
+
+How leptokurtic is the data?
+```{r}
+kurtosis(dptp$eqpoint)
+```
+
+H1b: perform a one-sample t-test of the PSEs from the winning model, which we expect to be significantly higher than zero.
+```{r}
+H1b1<-t.test(dptp$eqpoint, mu = 0,alternative = "greater")
+H1b2<-t.test(dptp_pre$eqpoint, mu = 0, alternative = "greater")
+
+H1b1.wilcox<-wilcox.test(dptp$eqpoint, mu = 0, alternative = "greater")
+H1b2.wilcox<-wilcox.test(dptp_pre$eqpoint, mu = 0, alternative = "greater")
+```
+... we performed a one-sample t-test of the PSEs against zero. There was a significant preference for progress feedback (`r apa_print(H1b1)$statistic`). A sensitivity analysis indicated that the effect remained significant when we included participants with PSEs beyond the -0.5~0.5 bounds (`r apa_print(H1b2)$statistic`), or when we used the non-parametric Wilcoxon signed-rank test to account for the non-normal nature of the PSE distribution (n=114: `r apa_print(H1b1.wilcox)$statistic`; n=120: `r apa_print(H1b1.wilcox)$statistic`).
+
+The corresponding histogram:
+```{r}
+# Bootstrapping to get 95% CI for eqpoint -- no exclu
+boot_result <- boot(dptp$eqpoint, mean_func, R = 5000)
+boot_ci <- boot.ci(boot_result, type = "basic")
+mean_eqpoint_1 <- mean(dptp$eqpoint)
+ci_lower_1 <- boot_ci$basic[4]  # Lower bound of 95% CI
+ci_upper_1 <- boot_ci$basic[5]  # Upper bound of 95% CI
+
+#the PSE at group level is small
+print(mean(dptp$eqpoint))
+print(c(ci_lower_1,ci_upper_1))
+print(mean(dptp$eqpoint>=0.05))
+```
+
+Histogram (abandoned from draft 5)
+```{r}
+# Create a temporary histogram to get the bin counts
+hist_data <- ggplot_build(ggplot(dptp, aes(x = eqpoint)) +
+                            geom_histogram(color = "blue", fill = "white"))$data[[1]]
+# Calculate the y position as 105% of the maximum bin count
+y_position_1 <- max(hist_data$count) * 1.05
+
+dptp %>% ggplot(aes(x=eqpoint))+
+  geom_histogram(color="blue",fill="white")+
+  geom_vline(xintercept=0,linetype = 3,color="red",size=1.2)+
+  geom_point(aes(x = mean_eqpoint_1, y = y_position_1), 
+             shape = 21, color = "black", 
+             size = 1.2, stroke = 1) +  # Mean dot
+  geom_errorbarh(aes(y = y_position_1, xmin = ci_lower_1, xmax = ci_upper_1), 
+                 color = "black", height = 0.5, size = 1.2) +  # 95% CI as horizontal error bar
+  labs(x = expression(SV["PF+"]), 
+       y = "Number of participants")+
+  theme_classic()+
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "none")+theme(text = element_text(size = 16))
+ggsave('figs/histogram_for_PSE.jpg',width=7.29,height=4.51)
+```
+
+
+# Individual differences in the preference for progress feedback
+H3: People with higher emotional volatility will show greater preference for progress feedback.
+```{r}
+H3.1<-cor.test(dptp$eqpoint,
+               dptp$bfi2EmotionalVolatility_total,alternative="greater")
+```
+
+Acknowledging that the data is leptokurtic, we included non-parametric tests, and we check whether excluding the out-of-bounds PSEs have an effect (sensitivity analysis):
+```{r}
+H3.2<-cor.test(dptp$eqpoint,
+               dptp$bfi2EmotionalVolatility_total,
+               method = "spearman", exact = FALSE,alternative = "greater")
+
+#sensitivity analysis: for deviation from pre-registration
+H3sens.1<-cor.test(dptp_pre$eqpoint,
+                   dptp_pre$bfi2EmotionalVolatility_total,alternative = "greater")
+H3sens.2<-cor.test(dptp_pre$eqpoint,
+                   dptp_pre$bfi2EmotionalVolatility_total,method = "spearman", exact = FALSE,alternative = "greater")
+```
+
+Write up: 
+Contrary to our prediction, there were no significant correlation between the BFI-2 facet score of emotional volatility and the PSEs (`r apa_print(H3.1)$full_result`; with non-parametric statistics, Spearman's rank correlation: `r apa_print(H3.2)$full_result`); this was also the case when we did not exclude PSEs outside of -0.5~0.5 (`r apa_print(H3sens.1)$full_result`; with Spearman's rank correlation: `r apa_print(H3sens.2)$full_result`).
+
+Exploratory analysis:
+```{r}
+qns_to_explore<-c("IUS_sum",
+                  "ami_total","amiBA_total","amiES_total","amiSM_total",
+                  "bfi2ANX_total","bfi2Energy_total",
+                  "PHQ_sum")
+qns_explore_result<-data.frame()
+for(i in qns_to_explore){
+  testOut<-cor.test(dptp$eqpoint,dptp[,i],method = "spearman", exact = FALSE)
+  qns_explore_result<-rbind(qns_explore_result,
+                            data.frame(qns=i,estimate = testOut$estimate, p_unadjusted = testOut$p.value))
+}
+qns_explore_result$p_adj_fdr<-p.adjust(qns_explore_result$p_unadjusted, method = "fdr")
+
+qns_explore_sens<-data.frame()
+for(i in qns_to_explore){
+  testOut<-cor.test(dptp_pre$eqpoint,dptp_pre[,i],
+                    method = "spearman", exact = FALSE)
+  qns_explore_sens<-rbind(qns_explore_sens,
+                          data.frame(qns=i,
+                                     estimate = testOut$estimate, 
+                                     p_unadjusted = testOut$p.value))
+}
+qns_explore_sens$p_adj_fdr<-p.adjust(qns_explore_sens$p_unadjusted, method = "fdr")
+```
+
+Social Motivation: survived FDR; raw result `r apa_print(cor.test(dptp$eqpoint,dptp[,"amiSM_total"],method = "spearman", exact = FALSE))$full_result`, FDR gives `r qns_explore_result$p_adj_fdr[qns_explore_result$qns=="amiSM_total"]`;
+sensitivity analysis indicated `r apa_print(cor.test(dptp_pre$eqpoint,dptp_pre[,"amiSM_total"],method = "spearman", exact = FALSE))$full_result`, FDR `r qns_explore_sens$p_adj_fdr[qns_explore_sens$qns=="amiSM_total"]`.
+
+Follow-up: when PSE>0: `r apa_print(cor.test(dptp$eqpoint[dptp$eqpoint>0],dptp$amiSM_total[dptp$eqpoint>0],method="spearman"))$full_result`; not the case when PSE<0, `r apa_print(cor.test(dptp$eqpoint[dptp$eqpoint<0],dptp$amiSM_total[dptp$eqpoint<0],method="spearman"))$full_result`
+
+
+Visualising the prereged H3 & the exploration result:
+```{r}
+ggarrange(
+dptp %>% CorrSmoothLmPlot("bfi2EmotionalVolatility_total","eqpoint",
+                          Xlabel = "Emotional Volatility",
+                          Ylabel = expression(SV["PF+"]),add_corr_label=F)+theme(text=element_text(size=16)),
+dptp %>% CorrSmoothLmPlot("amiSM_total","eqpoint",
+                          Xlabel = "Apathy in Social Motivation",
+                          Ylabel = expression(SV["PF+"]),add_corr_label=F)+theme(text=element_text(size=16)),
+nrow=1,
+labels=c("A","B")
+)
+ggsave('figs/corr_with_PSE.jpg',width=7.29,height=4.51)
+```
+
+# The Ratings: Subjective experience of effort and progress feedback
+As pre-registered, need to exclude some people here:
+"Specifically, for H2, we will only include participants with a sufficient number of trials in each condition: after excluding trials where participants do not complete the physical work ("failure” trials), a participant must have at least six trials for PF+ and six trials for PF- condition, and the trials should cover at least two levels of physical work with a minimum of three data points in each."
+```{r}
+dNoFail<-mega[mega$isGoalReached,] #exclude where the number of pumps required was not completed
+
+#check if some participants have fewer than six trials in each effort type
+sBalanced <-dNoFail %>% group_by(prolific_id,effort_type) %>% 
+  summarise(cell_n = n(),.groups = "drop") %>%
+  complete(prolific_id, effort_type, fill = list(cell_n = 0)) #grabs those who don't have this condition
+keep4ratings <- sBalanced$prolific_id[sBalanced$cell_n >= 6] #no fewer than six trials in each cond
+
+#check if enough cells per participant (enough conditions spanned); exclude the participants
+sCheck <- dNoFail %>% group_by(prolific_id,actual_offer,effort_type) %>% 
+  summarise(cell_n = n()) #count the number of data points in each cell
+sCheck <- sCheck[sCheck$cell_n>3,]
+s1<-as.data.frame(table(sCheck$prolific_id[sCheck$effort_type=="no-progress"]))
+s2<-as.data.frame(table(sCheck$prolific_id[sCheck$effort_type=="with-progress"]))
+
+#now exclude those with no more than two cells fitting the criteria
+enoughNoProgress<-s1$Var1[s1$Freq>1]
+enoughWithProgress<-s2$Var1[s2$Freq>1]
+
+keep4ratings <- intersect(keep4ratings,intersect(enoughNoProgress,enoughWithProgress))
+
+dlme<-dNoFail[dNoFail$prolific_id %in% keep4ratings,]
+```
+
+H2: We will fit a linear mixed-effects model to the effort ratings of each participant, with a random intercept per participant, and fixed effects for the “effort level” (the chosen level of physical work, as visually indicated on the screen) and “effort type” (PF+ vs. PF-). We will exclude trials where the number of pumps required was not completed. Interaction effects and/or random slopes will only be included if 1) there will be strong BIC-based evidence in favour of inclusion, and 2) the model fit will converge and is not singular. We expect a significant effect of effort type, where PF- will be perceived as more effortful than PF+.
+```{r}
+#wrangle data so avoid those factors
+dlme$noProgress<-1
+dlme$noProgress[dlme$progress_shown]<-0
+dlme$effort_type<-dlme$noProgress
+dlme$failure<-as.numeric(!dlme$isGoalReached)
+
+m1.0<-lmer(rating~effort_level*effort_type+(1|prolific_id)+(0+effort_level|prolific_id)+(0+effort_type|prolific_id), dlme)
+m1.1<-lmer(rating~effort_level*effort_type+(1|prolific_id)+(0+effort_level|prolific_id),dlme)
+m1.2<-lmer(rating~effort_level*effort_type+(1|prolific_id)+(0+effort_type|prolific_id),dlme)
+m2<-lmer(rating~effort_level+effort_type+(1|prolific_id)+(0+effort_level|prolific_id)+(0+effort_type|prolific_id),dlme)
+m3<-lmer(rating~effort_level+effort_type+(1|prolific_id)+(0+effort_level|prolific_id),dlme)
+m4<-lmer(rating~effort_level+effort_type+(1|prolific_id)+(0+effort_type|prolific_id),dlme)
+m5<-lmer(rating~effort_level+effort_type+(1|prolific_id),dlme)
+m6<-lmer(rating~effort_level*effort_type+(1|prolific_id),dlme)
+
+tBIC<-BIC(m1.0,m1.1,m1.2,m2,m3,m4,m5,m6)
+tBIC$diffBIC<-tBIC$BIC-min(tBIC$BIC)
+tBIC
+apa_table(tBIC)
+```
+
+model comparison
+https://joshuawiley.com/MonashHonoursStatistics/LMM_Comparison.html#non-nested-models
+-Check whether the fixed effect of effort_type is necessary
+```{r}
+mNull1<-lmer(rating~effort_level+(1|prolific_id),dlme)
+mNull2<-lmer(rating~effort_level+(1|prolific_id)+(0+effort_level|prolific_id),dlme)
+mNull3<-lmer(rating~effort_level+effort_type+(1|prolific_id)+(0+effort_level|prolific_id),dlme)
+mNull4<-lmer(rating~effort_level+effort_type+(1|prolific_id)+(0+effort_type|prolific_id),dlme)
+t2BIC<-BIC(m2,mNull1,mNull2,mNull3,mNull4)
+t2BIC$diffBIC<-t2BIC$BIC-min(t2BIC$BIC)
+t2BIC
+apa_table(t2BIC)
+```
+
+Importantly, model comparison supports keeping effort type in...
+
+
+Set winner and do model checks
+```{r}
+m1<-m2
+apa_table(apa_print(m1)$table)
+```
+
+Further wrangle to get exact p values?
+```{r}
+m1pVal<-summary(m1)
+m1pVal$coefficients
+```
+
+```{r}
+performance::check_model(m1,
+                         check=c("linearity","homogeneity","qq","outliers"))
+```
+
+
+Do bootstrapping, if unsure of residual normality
+```{r}
+# if(!exists('lmer_par_boot')){
+#   lmer_par_boot <- lmeresampler::bootstrap(m1, .f = fixef, type = "parametric", B = 1000)
+#   #critical to use lmeresampler:: since modelr decided to have a function of the same name...
+# }
+# names(lmer_par_boot)
+# summary(lmer_par_boot)
+# confint(lmer_par_boot,type="basic",level=0.95)
+```
+
+Visualise: effort rating plots
+```{r}
+d4p<-dlme #define the data frame for plotting
+d4p<-d4p %>% 
+  group_by(prolific_id) %>% 
+  mutate(rating = mean_centre_this(rating))
+sumRatings<-d4p[d4p$progress_shown,] %>% 
+  group_by(prolific_id,effort_level) %>% 
+  summarize(MeanRating = mean(rating), SE = sd(rating) / sqrt(n()))
+#repeat for no progress
+sumRatings2<-d4p[!d4p$progress_shown,] %>% 
+  group_by(prolific_id,effort_level) %>% 
+  summarize(MeanRating = mean(rating), SE = sd(rating) / sqrt(n()))
+
+ggarrange(
+ggplot(sumRatings, aes(x = effort_level, y = MeanRating,color = prolific_id)) +
+  geom_point(alpha=0.1) + geom_line(aes(group = prolific_id),alpha=0.1) +
+  stat_summary(aes(group=1),
+               fun.data = mean_cl_boot,
+               size = 0.2,
+               position=position_nudge(x = 0.01, y = 0))+
+  labs(title = "PF+", 
+       x = "Effort Level", 
+       y = "Rating \n (mean-centred)")+
+  scale_x_continuous(limits = c(0.2,1.1))+
+  scale_y_continuous(limits = c(-0.41,0.5))+#0.86))+
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "none")+theme(text=element_text(size=14)),
+
+ggplot(sumRatings2, aes(x = effort_level, y = MeanRating,color = prolific_id)) +
+  geom_point(alpha=0.1) + geom_line(aes(group = prolific_id),alpha=0.1) +
+  stat_summary(aes(group=1),
+               fun.data = mean_cl_boot,
+               size = 0.2,
+               position=position_nudge(x = 0.01, y = 0))+
+  labs(title = "PF-", 
+       x = "Effort Level", 
+       y = "Rating \n (mean-centred)")+
+  scale_x_continuous(limits = c(0.2,1.1))+
+  scale_y_continuous(limits = c(-0.41,0.5))+#0.86))+
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y = element_blank(),
+        legend.position = "none")+theme(text=element_text(size=14)),
+nrow=1
+)
+ggsave('figs/ratings_main.jpg',width=8.4,height=4.51)
+```
+
+
+# Sensitivity analysis for H2: include all trials + analyse Fail on effort ratings
+-For the H2 sensitivity analysis above, we will use all trials from all participants and include failure as another fixed effect. Failures might 1) be positively associated with the subjective experience of effort, and/or 2) blunt the sensitivity of effort ratings – this could be reflected in a significant failure-by-workload interaction, where failure trials with different levels of expected physical work are rated more similarly than non-failure trials.
+```{r}
+mega$noProgress<-1
+mega$noProgress[mega$progress_shown]<-0
+mega$effort_type<-mega$noProgress
+mega$failure<-as.numeric(!mega$isGoalReached)
+```
+
+Check: are failures more prevalent in with-progress?
+```{r}
+summary(glmer(failure~effort_type+(1|prolific_id),mega,family=binomial))
+```
+
+```{r}
+f1m1 <- lmer(rating~effort_level*effort_type*failure+(1|prolific_id)+(0+effort_level|prolific_id)+(0+effort_type|prolific_id)+(0+failure|prolific_id), mega)
+f1m2 <- lmer(rating~effort_level*effort_type*failure+(1|prolific_id)+(0+effort_level|prolific_id)+(0+effort_type|prolific_id), mega)
+f1m3 <- lmer(rating~effort_level*effort_type*failure+(1|prolific_id)+(0+effort_level|prolific_id)+(0+failure|prolific_id), mega)
+f1m4 <- lmer(rating~effort_level*effort_type*failure+(1|prolific_id)+(0+effort_type|prolific_id)+(0+failure|prolific_id), mega)
+f1m5 <- lmer(rating~effort_level*effort_type*failure+(1|prolific_id)+(0+effort_type|prolific_id)+(0+failure|prolific_id), mega)
+f1m6 <- lmer(rating~effort_level*effort_type*failure+(1|prolific_id)+(0+effort_level|prolific_id), mega)
+f1m7 <- lmer(rating~effort_level*effort_type*failure+(1|prolific_id)+(0+effort_type|prolific_id), mega)
+f1m8 <- lmer(rating~effort_level*effort_type*failure+(1|prolific_id)+(0+failure|prolific_id), mega)
+f1m9 <- lmer(rating~effort_level*effort_type*failure+(1|prolific_id), mega)
+
+f2m1 <- lmer(rating~effort_level*effort_type+failure+(1|prolific_id)+(0+effort_level|prolific_id)+(0+effort_type|prolific_id)+(0+failure|prolific_id), mega)
+f2m2 <- lmer(rating~effort_level*effort_type+failure+(1|prolific_id)+(0+effort_level|prolific_id)+(0+effort_type|prolific_id), mega)
+f2m3 <- lmer(rating~effort_level*effort_type+failure+(1|prolific_id)+(0+effort_level|prolific_id)+(0+failure|prolific_id), mega)
+f2m4 <- lmer(rating~effort_level*effort_type+failure+(1|prolific_id)+(0+effort_type|prolific_id)+(0+failure|prolific_id), mega)
+f2m5 <- lmer(rating~effort_level*effort_type+failure+(1|prolific_id)+(0+effort_type|prolific_id)+(0+failure|prolific_id), mega)
+f2m6 <- lmer(rating~effort_level*effort_type+failure+(1|prolific_id)+(0+effort_level|prolific_id), mega)
+f2m7 <- lmer(rating~effort_level*effort_type+failure+(1|prolific_id)+(0+effort_type|prolific_id), mega)
+f2m8 <- lmer(rating~effort_level*effort_type+failure+(1|prolific_id)+(0+failure|prolific_id), mega)
+f2m9 <- lmer(rating~effort_level*effort_type+failure+(1|prolific_id), mega)
+
+f3m1 <- lmer(rating~effort_level+effort_type+failure+(1|prolific_id)+(0+effort_level|prolific_id)+(0+effort_type|prolific_id)+(0+failure|prolific_id), mega)
+f3m2 <- lmer(rating~effort_level+effort_type+failure+(1|prolific_id)+(0+effort_level|prolific_id)+(0+effort_type|prolific_id), mega)
+f3m3 <- lmer(rating~effort_level+effort_type+failure+(1|prolific_id)+(0+effort_level|prolific_id)+(0+failure|prolific_id), mega)
+f3m4 <- lmer(rating~effort_level+effort_type+failure+(1|prolific_id)+(0+effort_type|prolific_id)+(0+failure|prolific_id), mega)
+f3m5 <- lmer(rating~effort_level+effort_type+failure+(1|prolific_id)+(0+effort_type|prolific_id)+(0+failure|prolific_id), mega)
+f3m6 <- lmer(rating~effort_level+effort_type+failure+(1|prolific_id)+(0+effort_level|prolific_id), mega)
+f3m7 <- lmer(rating~effort_level+effort_type+failure+(1|prolific_id)+(0+effort_type|prolific_id), mega)
+f3m8 <- lmer(rating~effort_level+effort_type+failure+(1|prolific_id)+(0+failure|prolific_id), mega)
+f3m9 <- lmer(rating~effort_level+effort_type+failure+(1|prolific_id), mega)
+
+f4m1 <- lmer(rating~effort_level*failure+effort_type+(1|prolific_id)+(0+effort_level|prolific_id)+(0+effort_type|prolific_id)+(0+failure|prolific_id), mega)
+f4m2 <- lmer(rating~effort_level*failure+effort_type+(1|prolific_id)+(0+effort_level|prolific_id)+(0+effort_type|prolific_id), mega)
+f4m3 <- lmer(rating~effort_level*failure+effort_type+(1|prolific_id)+(0+effort_level|prolific_id)+(0+failure|prolific_id), mega)
+f4m4 <- lmer(rating~effort_level*failure+effort_type+(1|prolific_id)+(0+effort_type|prolific_id)+(0+failure|prolific_id), mega)
+f4m5 <- lmer(rating~effort_level*failure+effort_type+(1|prolific_id)+(0+effort_type|prolific_id)+(0+failure|prolific_id), mega)
+f4m6 <- lmer(rating~effort_level*failure+effort_type+(1|prolific_id)+(0+effort_level|prolific_id), mega)
+f4m7 <- lmer(rating~effort_level*failure+effort_type+(1|prolific_id)+(0+effort_type|prolific_id), mega)
+f4m8 <- lmer(rating~effort_level*failure+effort_type+(1|prolific_id)+(0+failure|prolific_id), mega)
+f4m9 <- lmer(rating~effort_level*failure+effort_type+(1|prolific_id), mega)
+
+f5m1 <- lmer(rating~effort_level+effort_type*failure+(1|prolific_id)+(0+effort_level|prolific_id)+(0+effort_type|prolific_id)+(0+failure|prolific_id), mega)
+f5m2 <- lmer(rating~effort_level+effort_type*failure+(1|prolific_id)+(0+effort_level|prolific_id)+(0+effort_type|prolific_id), mega)
+f5m3 <- lmer(rating~effort_level+effort_type*failure+(1|prolific_id)+(0+effort_level|prolific_id)+(0+failure|prolific_id), mega)
+f5m4 <- lmer(rating~effort_level+effort_type*failure+(1|prolific_id)+(0+effort_type|prolific_id)+(0+failure|prolific_id), mega)
+f5m5 <- lmer(rating~effort_level+effort_type*failure+(1|prolific_id)+(0+effort_type|prolific_id)+(0+failure|prolific_id), mega)
+f5m6 <- lmer(rating~effort_level+effort_type*failure+(1|prolific_id)+(0+effort_level|prolific_id), mega)
+f5m7 <- lmer(rating~effort_level+effort_type*failure+(1|prolific_id)+(0+effort_type|prolific_id), mega)
+f5m8 <- lmer(rating~effort_level+effort_type*failure+(1|prolific_id)+(0+failure|prolific_id), mega)
+f5m9 <- lmer(rating~effort_level+effort_type*failure+(1|prolific_id), mega)
+```
+
+```{r}
+bigBIC<-BIC(f1m1,f1m2,f1m3,f1m4,f1m5,f1m6,f1m7,f1m8,f1m9,
+            f2m1,f2m2,f2m3,f2m4,f2m5,f2m6,f2m7,f2m8,f2m9,
+            f3m1,f3m2,f3m3,f3m4,f3m5,f3m6,f3m7,f3m8,f3m9,
+            f4m1,f4m2,f4m3,f4m4,f4m5,f4m6,f4m7,f4m8,f4m9,
+            f5m1,f5m2,f5m3,f5m4,f5m5,f5m6,f5m7,f5m8,f5m9)
+bigBIC$diffBIC<-bigBIC$BIC-min(bigBIC$BIC)
+bigBIC
+```
+
+New winner: f3m1, rating~effort_level+effort_type+failure, with three random slopes!
+
+The effect of effort type for this sensitivity analysis: `r apa_print(f3m1)$full_result$effort_type`...
+
+Now the table:
+```{r}
+#summary(f3m1)
+apa_table(apa_print(f3m1)$table)
+```
+
+For exact p values
+```{r}
+f3m1p<-summary(f3m1)
+f3m1p$coefficients
+```
+
+
+# Supplementary Information
+We checked whether the adaptive algorithm helped probe the PSE of each participant:
+```{r}
+ggplot(mega, aes(x = trial_in_chain, y = dOffer,color = prolific_id)) +
+  #geom_point() + 
+  geom_line(aes(group = prolific_id),
+            #color = "grey", 
+            alpha = 0.1) + #we can see faint lines touching 0.5 and -0.5
+  stat_summary(fun.data = mean_cl_boot, 
+             shape = 21, fill = "white", #this is to make the stat summary hollow
+             size = 0.4,
+             color= "black",na.rm = TRUE)+
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed")+
+  geom_hline(yintercept = 0.05, color = "red", linetype = "dashed")+
+  geom_hline(yintercept = 0.025, color = "blue", linetype = "dashed")+
+  facet_wrap(vars(chain_ind),labeller=as_labeller(c(`1`='Chain 1',
+                                                    `2`='Chain 2',
+                                                    `3`='Chain 3')))+
+  labs(title = " ", 
+       x = "trials", 
+       y = "Difference in effort offers \n With-Progress - No-Progress")+
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "none")
+```
+
+Choices around the zone of convergence
+```{r}
+ggplot(choice_dEff[choice_dEff$dOffer %in% levels2keep,], 
+       aes(x = dOffer, y = pChooseRef,color = prolific_id)) +
+  geom_line(aes(group = prolific_id),
+            #color = "grey",
+            alpha=0.1) +
+  stat_summary(fun = mean,
+               fun.max = function(x) mean(x) + 1.96*sd(x) / sqrt(length(unique(choice_dEff$prolific_id))),
+               fun.min = function(x) mean(x) - 1.96*sd(x) / sqrt(length(unique(choice_dEff$prolific_id))),
+               shape = 21, fill = "white", #this is to make the stat summary hollow
+               size = 0.8,
+               color= "black")+
+  labs(title = "Choice data for offer combinations \n encountered by over 50% of participants", 
+       x = "Difference in effort offered, \n With-Progress-Feedback (PF+) - No-Progress-Feedback (PF-)", 
+       y = "p(Choose PF+)")+
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "none")
+```
+
+For the questionnaire explorations:
+```{r}
+qns_explore_table<-qns_explore_result[,c("qns","estimate","p_unadjusted","p_adj_fdr")]
+rownames(qns_explore_table)<-NULL
+```
+
+okay now I rename everything:
+```{r}
+qns_explore_table$qns<-dplyr::recode(qns_explore_table$qns,
+                                     IUS_sum = "IUS-12",
+                                     ami_total = "AMI total score",
+                                     amiBA_total = "Behavioral Activation subscale of AMI",
+                                     amiES_total = "Emotional Sensitivity subscale of AMI",
+                                     amiSM_total = "Social Motivation subscale of AMI",
+                                     bfi2ANX_total = "Anxiety facet score of BFI-2",
+                                     bfi2Energy_total = "Energy facet score of BFI-2",
+                                     PHQ_sum = "PHQ-9")
+names(qns_explore_table)[names(qns_explore_table)=="qns"]<-"Questionnaire"
+names(qns_explore_table)[names(qns_explore_table)=="estimate"]<-"Spearman's rank correlation"
+names(qns_explore_table)[names(qns_explore_table)=="p_unadjusted"]<-"unadjusted p value"
+names(qns_explore_table)[names(qns_explore_table)=="p_adj_fdr"]<-"adjusted p value"
+qns_explore_table %>%
+  kable(format = "pandoc", 
+        digits = 3, 
+        caption = " ") %>%
+  kable_styling() %>% 
+  row_spec(0, bold = TRUE, hline_after = TRUE) %>%
+  row_spec(nrow(qns_explore_table), hline_after = TRUE)
+```
+
+Does the failure rate confound any of the other findings? (All held in directionality)
+-This is to go to the supplementary.
+```{r}
+library(ppcor)
+pcor.test(x = dptp$bfi2EmotionalVolatility_total, y = dptp$eqpoint, 
+          z = dptp[,c("p_fail","Age")], method = "spearman")
+
+pcor.test(x = dptp$amiSM_total, y = dptp$eqpoint, 
+          z = dptp[,c("p_fail","Age")], method = "spearman")
+```
