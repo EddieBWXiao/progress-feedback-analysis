@@ -174,3 +174,88 @@ CorrSmoothLmPlot<-function(din,Xvar,Yvar,Xlabel = Xvar,Ylabel=Yvar,
 
   return(outplot)
 }
+
+# twice-used functions for manuscript write-up
+write_up_mega_wrangle<-function(mega, set_tC){
+  # wrange the mega table
+  # set_tC differs for Exp1 and Exp2
+  
+  mega<-mega %>% mutate(effort_type = recode(as.numeric(progress_shown),
+                                             `1` = "with-progress", `0`="no-progress"))
+  #alright mutate/recode cannot into `TRUE` for logical...
+  mega$effort_type<-factor(mega$effort_type,
+                           levels = c("no-progress","with-progress")) #so no-progress will look red, more intuitive
+  #label the trials across each chain
+  mega$trial_in_chain<-NA
+  mega$chain_ind <- mega$record_currentChain+1
+  for(t in 1:nrow(mega)){
+    if(mega$trialn[t]==1){
+      tC = set_tC #c(0,0,0) for Exp2, c(0,0,0,0) for Exp1
+    }
+    tC[mega$chain_ind[t]]=tC[mega$chain_ind[t]]+1
+    mega$trial_in_chain[t] = tC[mega$chain_ind[t]]
+  }
+  return(mega)
+}
+choice_func_plot<-function(mega, set_title){
+  # to visualise group-level mean choice & ptp-level curves
+  # summary first, then plot
+  choice_dEff<-mega %>% 
+    group_by(prolific_id,dOffer) %>% 
+    summarize(pChooseRef = mean(ChoseRef==1))
+  effSum<-mega %>% 
+    group_by(dOffer) %>% 
+    summarize(pChooseRef = mean(ChoseRef==1),
+              n_data = n())
+  levels2keep1<-names(table(effSum$dOffer[effSum$n_data>20]))
+  levels2keep<-as.numeric(levels2keep1)
+  figOut<-ggplot(choice_dEff[choice_dEff$dOffer %in% levels2keep,], 
+                aes(x = dOffer, y = pChooseRef,color = prolific_id)) +
+    geom_line(aes(group = prolific_id),
+              #color = "grey",
+              alpha=0.12) +
+    stat_summary(fun.data = mean_cl_boot, 
+                 shape = 21, fill = "white", #this is to make the stat summary hollow
+                 size = 0.8,
+                 color= "black")+
+    labs(title = set_title, 
+         x = "△effort", 
+         y = "p(Choose PF+)")+
+    theme_classic()+
+    theme(plot.title = element_text(hjust = 0.5),
+          legend.position = "none")+theme(text = element_text(size = 16))
+  return(list(figOut = figOut,choice_dEff=choice_dEff))
+}
+SVPFhist<-function(dptp){
+  # Bootstrapping to get 95% CI for eqpoint -- no exclu
+  boot_result <- boot(dptp$eqpoint, mean_func, R = 5000)
+  boot_ci <- boot.ci(boot_result, type = "basic")
+  mean_eqpoint_1 <- mean(dptp$eqpoint)
+  ci_lower_1 <- boot_ci$basic[4]  # Lower bound of 95% CI
+  ci_upper_1 <- boot_ci$basic[5]  # Upper bound of 95% CI
+  
+  #the PSE at group level is small
+  print(mean(dptp$eqpoint))
+  print(c(ci_lower_1,ci_upper_1))
+  print(mean(dptp$eqpoint>=0.05))
+  
+  # Create a temporary histogram to get the bin counts
+  hist_data <- ggplot_build(ggplot(dptp, aes(x = eqpoint)) +
+                              geom_histogram(color = "blue", fill = "white"))$data[[1]]
+  # Calculate the y position as 105% of the maximum bin count
+  y_position_1 <- max(hist_data$count) * 1.05
+  
+  dptp %>% ggplot(aes(x=eqpoint))+
+    geom_histogram(color="blue",fill="white")+
+    geom_vline(xintercept=0,linetype = 3,color="red",size=1.2)+
+    geom_point(aes(x = mean_eqpoint_1, y = y_position_1), 
+               shape = 21, color = "black", 
+               size = 1.2, stroke = 1) +  # Mean dot
+    geom_errorbarh(aes(y = y_position_1, xmin = ci_lower_1, xmax = ci_upper_1), 
+                   color = "black", height = 0.5, size = 1.2) +  # 95% CI as horizontal error bar
+    labs(x = expression(SV["PF+"]), 
+         y = "Number of participants")+
+    theme_classic()+
+    theme(plot.title = element_text(hjust = 0.5),
+          legend.position = "none")+theme(text = element_text(size = 16))
+}

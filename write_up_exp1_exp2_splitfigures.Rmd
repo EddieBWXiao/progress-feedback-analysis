@@ -1,5 +1,5 @@
 ---
-title: "The value of progress feedback in effrort-based decision-making"
+title: "The value of progress feedback in physical effort-based decision-making"
 output: word_document
 ---
 
@@ -24,6 +24,8 @@ library(broom.mixed)
 library(e1071)
 library(knitr)
 library(kableExtra)
+library(patchwork)
+library(effectsize)
 
 CurrentSourceWD<-dirname(rstudioapi::getSourceEditorContext()$path)
 setwd(CurrentSourceWD)
@@ -116,6 +118,13 @@ TwoWayLineSEsum<-function(din,Xvar,Yvar,GroupVar,
 theme_set(theme_classic()+theme(text = element_text(size = 18)))
 ```
 
+THIS VERSION OPERATES ON BOTH EXP1 AND EXP2
+-EXP1 labelled with 1 at the end of each var...
+-Extra change for SplitFigure: Exp1 plots in one figure, and Exp2 plots in another
+
+Further correction: effort level shown on figures were the "red line depth", not true effort level as %MVC.
+
+FOR EXP2:
 IMPORTANT DEVIATION FROM PRE-REGISTRATION:
 -Some PSE unrealistic; not considered within-prereg... these people will be excluded for all analysis
 -However, we will report results from the PSE-related hypothesis that DO have those participants 
@@ -127,72 +136,66 @@ Load the cleaned-up data with extra variables calculated:
 -mega_pre = table with all trials from all 120 participants; 
 -dptp_pre = participant-level table, with the pre-registered exclusion (so n=120)
 ```{r}
+load("data_exp1/Exp1megatable_final.RData") #gets mega
+mega1 = mega
+rm(mega)
 load("data/Exp2megatable_final.RData") #gets mega
 
+#=============================================
 #get the pre-registered exclusion
+keep1<-read.csv('data_exp1/keep_effort_not_failed.csv')
+keep1<-keep1$x
 keep<-read.csv('data/keep_effort_not_failed.csv')
 keep<-keep$x
 
-#also: add dptp to mega
+#=============================================
+#also: dptp for participant-level information
+dptp1<-read.csv("data_exp1/Exp1_PtpVarTable_full.csv")
+dmod1<-read.csv("data_exp1/exp1_BICtable.csv") #for modelling
+dptp1 <-left_join(dptp1,dmod1,by="prolific_id")
+
 dptp<-read.csv("data/Exp2_PtpVarTable_full.csv")
 dmod<-read.csv("data/exp2_BICtable.csv") #for modelling
 dptp <-left_join(dptp,dmod,by="prolific_id")
 ```
 
 ```{r}
-dptp_sel <- dplyr::select(dptp,prolific_id,
-                          CursorControl,Handedness,eqpoint)
 #get the additional exclusion (deviating from pre-reg due to implausible values)
 excluPSEs<-dptp$prolific_id[!(dptp$eqpoint<0.5 & dptp$eqpoint> -0.5)]
 write.csv(data.frame(excluPSEs),'data/exclu_PSEs.csv')
 
+#=============================================
 #IMPORTANT: implement exclusion here
+mega1$prolific_id<-factor(mega1$prolific_id)
+mega1<-mega1[mega1$prolific_id %in% keep1,]
+
 mega$prolific_id<-factor(mega$prolific_id)
 mega<-mega[mega$prolific_id %in% keep,]
+dptp_sel <- dplyr::select(dptp,prolific_id,
+                          CursorControl,Handedness,eqpoint)
 mega<-merge(mega,dptp_sel,by="prolific_id")
 ```
 
 ```{r}
 # Brief Data Wrangling
-mega<-mega %>% mutate(effort_type = recode(as.numeric(progress_shown),
-                                           `1` = "with-progress", `0`="no-progress"))
-  #alright mutate/recode cannot into `TRUE` for logical...
-mega$effort_type<-factor(mega$effort_type,
-                         levels = c("no-progress","with-progress")) #so no-progress will look red, more intuitive
+mega1<-write_up_mega_wrangle(mega1,c(0,0,0,0))
+mega<-write_up_mega_wrangle(mega,c(0,0,0))
 
+the_equal_levels1<-unique(mega1$ChosenEffortLevel[mega1$ChoseRef==1])
 the_equal_levels<-unique(mega$ChosenEffortLevel[mega$ChoseRef==1])
 
-#label the trials across each chain
-mega$trial_in_chain<-NA
-mega$chain_ind <- mega$record_currentChain+1
-for(t in 1:nrow(mega)){
-  if(mega$trialn[t]==1){
-    tC = c(0,0,0)
-  }
-  tC[mega$chain_ind[t]]=tC[mega$chain_ind[t]]+1
-  mega$trial_in_chain[t] = tC[mega$chain_ind[t]]
-}
+
+mega1$noProgress<-1
+mega1$noProgress[mega1$progress_shown]<-0
+mega1$effort_type<-mega1$noProgress
+mega1$failure<-as.numeric(!mega1$isGoalReached)
+
+mega$noProgress<-1
+mega$noProgress[mega$progress_shown]<-0
+mega$effort_type<-mega$noProgress
+mega$failure<-as.numeric(!mega$isGoalReached)
 
 # there should be NO additional column definitions beyond this point!!!
-```
-
-Addition: metrics relating to failures...
-```{r}
-failSum<-mega %>% 
-  group_by(prolific_id, progress_shown) %>% #for each effort type
-  summarise(fail_rate = mean(1-isGoalReached))
-
-#make into wide format so as to merge with dptp
-failSum_wide = failSum %>% 
-  pivot_wider(names_from = progress_shown,
-              names_prefix = "fail_rate_progress_shown",
-              values_from = fail_rate,
-              values_fill = 0) #important to get the empty cells to be 0?
-
-#calculate difference 
-failSum_wide$no_progress_effect_on_fail = failSum_wide$fail_rate_progress_shownFALSE-failSum_wide$fail_rate_progress_shownTRUE
-
-dptp<-merge(dptp,failSum_wide,by="prolific_id")
 ```
 
 Finally, where the multiversing of with or without the excluPSEs diverge:
@@ -205,134 +208,129 @@ dptp <- dptp[!(dptp$prolific_id %in% excluPSEs),]
 
 # Demographics - commented out due to display issue in word
 ```{r}
-#table(dptp$Sex)
-#sumtable(dptp,vars=c('Age','Sex','Handedness','CursorControl'))
+# table(dptp1$Sex)
+# sumtable(dptp1,vars=c('Age','Sex','Handedness','CursorControl'))
+```
+
+```{r}
+# table(dptp$Sex)
+# sumtable(dptp,vars=c('Age','Sex','Handedness','CursorControl'))
 ```
 
 # Effort Preferences
-```{r}
-effSum<-mega %>% 
-  group_by(dOffer) %>% 
-  summarize(pChooseRef = mean(ChoseRef==1),
-            n_data = n())
-choice_dEff<-mega %>% 
-  group_by(prolific_id,dOffer) %>% 
-  summarize(pChooseRef = mean(ChoseRef==1))
-```
-
-```{r}
-levels2keep1<-names(table(effSum$dOffer[effSum$n_data>20]))
-levels2keep<-as.numeric(levels2keep1)
-
-fig2b<-ggplot(choice_dEff[choice_dEff$dOffer %in% levels2keep,], 
-              aes(x = dOffer, y = pChooseRef,color = prolific_id)) +
-  geom_line(aes(group = prolific_id),
-            #color = "grey",
-            alpha=0.12) +
-  stat_summary(fun.data = mean_cl_boot, 
-               shape = 21, fill = "white", #this is to make the stat summary hollow
-               size = 0.8,
-               color= "black")+
-  labs(title = " ", 
-       x = "△effort", 
-       y = "p(Choose PF+)")+
-  theme_classic()+
-  theme(plot.title = element_text(hjust = 0.5),
-        legend.position = "none")+theme(text = element_text(size = 16))
-fig2b
-```
-
 H1a:
 ```{r}
+summary(exp1H1a<-glmer(ChoseRef~1+(1|prolific_id),mega1[mega1$dOffer==0,],family=binomial))
+tidy(exp1H1a,conf.int=TRUE,exponentiate=TRUE,effects="fixed")#get the odds ratio and 
+
 summary(H1a<-glmer(ChoseRef~1+(1|prolific_id),mega[mega$dOffer==0,],family=binomial))
-
-#get the odds ratio and 
-tidy(H1a,conf.int=TRUE,exponentiate=TRUE,effects="fixed")
+tidy(H1a,conf.int=TRUE,exponentiate=TRUE,effects="fixed")#get the odds ratio and 
 ```
 
-Following up on H1a: at the individual level
 ```{r}
-atEq<-choice_dEff[choice_dEff$dOffer==0,]
-mean(atEq$pChooseRef<0.5)
-mean(atEq$pChooseRef==1)
+fig2c<-choice_func_plot(mega1," ")
+fig2d<-choice_func_plot(mega," ")
 ```
-
 Get fig2a and combine with fig2b
 ```{r}
-fig2a<-ggplot(atEq,aes(pChooseRef))+
+fig2a<-ggplot(fig2c$choice_dEff[fig2c$choice_dEff$dOffer== 0,],aes(pChooseRef))+
   geom_histogram(binwidth = 0.1)+
   labs(title = " ", 
-     x = "Probability of choosing PF+ at △effort = 0", 
+     x = "Probability of choosing PF+\nat △effort = 0", 
      y = "Number of participants")+
   theme_classic()+
   theme(plot.title = element_text(hjust = 0.5),
         legend.position = "none")+theme(text = element_text(size = 16))
-ggarrange(fig2a,fig2b,labels = c("A","B"),nrow=2)
-ggsave('figs/effort_preference.jpg',width=7.29,height=9.0)
+fig2b<-ggplot(fig2d$choice_dEff[fig2d$choice_dEff$dOffer == 0,],aes(pChooseRef))+
+  geom_histogram(binwidth = 0.1)+
+  labs(title = " ", 
+     x = "Probability of choosing PF+\nat △effort = 0", 
+     y = "Number of participants")+
+  theme_classic()+
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "none")+theme(text = element_text(size = 16))
 ```
+```{r}
+layout <- (
+  (fig2a + labs(tag = "A")) + 
+  (fig2c$figOut + labs(tag = "C"))
+) / (
+  (fig2b + labs(tag = "B")) + 
+  (fig2d$figOut + labs(tag = "D"))
+)
+
+fig2 <- layout & 
+  theme(plot.tag = element_text(size = 16, face = "bold"))
+fig2
+ggsave('figs/effort_preference.jpg',width=9.0,height=7.6)
+```
+
 
 H1b: model comparison
 ```{r}
 #BIC table:
+print("Exp1")
+BICtable1<-colMeans(dptp1[,c("additive_lapse", "effmin_lapse", "additive_nolps", "effmin_nolps","choice_kernel")])
+BICtable1
+print("Key Evidence:")
+BICtable1["additive_nolps"]-BICtable1["effmin_nolps"]
+
+print("Exp2")
 BICtable<-colMeans(dptp[,c("additive_lapse", "effmin_lapse", "additive_nolps", "effmin_nolps","choice_kernel")])
 BICtable
+print("Key Evidence:")
 BICtable["additive_nolps"]-BICtable["effmin_nolps"]
-```
-
-How leptokurtic is the data?
-```{r}
-kurtosis(dptp$eqpoint)
 ```
 
 H1b: perform a one-sample t-test of the PSEs from the winning model, which we expect to be significantly higher than zero.
 ```{r}
+# Exp1: explore
+exp1eq<-t.test(dptp1$eqpoint, mu = 0)
+paste("$d_z = ", printnum(cohens_d(dptp1$eqpoint, mu = 0)$Cohens_d), "$", sep = "")
+exp1eq_check<-t.test(dptp1$eqpoint[dptp1$eqpoint<0.5 & dptp1$eqpoint>-0.5], mu = 0)
+paste("$d_z = ", printnum(cohens_d(dptp1$eqpoint[dptp1$eqpoint<0.5 & dptp1$eqpoint>-0.5], 
+                                   mu = 0)$Cohens_d), "$", sep = "")
+exp1.eq.wilcox<-wilcox.test(dptp$eqpoint, mu = 0)
+
+
+# Exp2: pre-registered
 H1b1<-t.test(dptp$eqpoint, mu = 0,alternative = "greater")
+paste("$d_z = ", printnum(cohens_d(dptp$eqpoint, mu = 0)$Cohens_d), "$", sep = "")
 H1b2<-t.test(dptp_pre$eqpoint, mu = 0, alternative = "greater")
+paste("$d_z = ", printnum(cohens_d(dptp_pre$eqpoint, mu = 0)$Cohens_d), "$", sep = "")
 
 H1b1.wilcox<-wilcox.test(dptp$eqpoint, mu = 0, alternative = "greater")
 H1b2.wilcox<-wilcox.test(dptp_pre$eqpoint, mu = 0, alternative = "greater")
 ```
-... we performed a one-sample t-test of the PSEs against zero. There was a significant preference for progress feedback (`r apa_print(H1b1)$statistic`). A sensitivity analysis indicated that the effect remained significant when we included participants with PSEs beyond the -0.5~0.5 bounds (`r apa_print(H1b2)$statistic`), or when we used the non-parametric Wilcoxon signed-rank test to account for the non-normal nature of the PSE distribution (n=114: `r apa_print(H1b1.wilcox)$statistic`; n=120: `r apa_print(H1b1.wilcox)$statistic`).
+... we performed a one-sample t-test of the PSEs against zero. There was a significant preference for progress feedback (Experiment 1: `r apa_print(exp1eq)$statistic`; Experiment 2: `r apa_print(H1b1)$statistic`). A sensitivity analysis indicated that the effect remained significant when we included participants with PSEs beyond the -0.5~0.5 bounds (Experiment 1: `r apa_print(exp1eq_check)$statistic`; Experiment 2: `r apa_print(H1b2)$statistic`).
+[TO SUPPLEMENTARY:]
+When we used the non-parametric Wilcoxon signed-rank test to account for the non-normal nature of the PSE distribution (n=114: `r apa_print(H1b1.wilcox)$statistic`; n=120: `r apa_print(H1b1.wilcox)$statistic`). For Exp1: `r apa_print(exp1.eq.wilcox)$statistic`
+
 
 The corresponding histogram:
 ```{r}
-# Bootstrapping to get 95% CI for eqpoint -- no exclu
-boot_result <- boot(dptp$eqpoint, mean_func, R = 5000)
-boot_ci <- boot.ci(boot_result, type = "basic")
-mean_eqpoint_1 <- mean(dptp$eqpoint)
-ci_lower_1 <- boot_ci$basic[4]  # Lower bound of 95% CI
-ci_upper_1 <- boot_ci$basic[5]  # Upper bound of 95% CI
-
-#the PSE at group level is small
-print(mean(dptp$eqpoint))
-print(c(ci_lower_1,ci_upper_1))
-print(mean(dptp$eqpoint>=0.05))
+ggarrange(SVPFhist(dptp1)+labs(title="Experiment 1"),SVPFhist(dptp)+labs(title="Experiment 2"),nrow=2,labels=c("A","B"))
+ggsave('figs/histogram_for_PSE.jpg',width=7.29,height=6.00)
 ```
 
-Histogram (abandoned from draft 5)
+Control analysis for failure rate: are failures more prevalent in with-progress?
 ```{r}
-# Create a temporary histogram to get the bin counts
-hist_data <- ggplot_build(ggplot(dptp, aes(x = eqpoint)) +
-                            geom_histogram(color = "blue", fill = "white"))$data[[1]]
-# Calculate the y position as 105% of the maximum bin count
-y_position_1 <- max(hist_data$count) * 1.05
+#note odd convergence issues when effort_type used
+summary(check_fail<-glmer(isGoalReached~progress_shown+effort_level+(1|prolific_id),mega,family=binomial))
 
-dptp %>% ggplot(aes(x=eqpoint))+
-  geom_histogram(color="blue",fill="white")+
-  geom_vline(xintercept=0,linetype = 3,color="red",size=1.2)+
-  geom_point(aes(x = mean_eqpoint_1, y = y_position_1), 
-             shape = 21, color = "black", 
-             size = 1.2, stroke = 1) +  # Mean dot
-  geom_errorbarh(aes(y = y_position_1, xmin = ci_lower_1, xmax = ci_upper_1), 
-                 color = "black", height = 0.5, size = 1.2) +  # 95% CI as horizontal error bar
-  labs(x = expression(SV["PF+"]), 
-       y = "Number of participants")+
-  theme_classic()+
-  theme(plot.title = element_text(hjust = 0.5),
-        legend.position = "none")+theme(text = element_text(size = 16))
-ggsave('figs/histogram_for_PSE.jpg',width=7.29,height=4.51)
+tidy(check_fail,conf.int=TRUE,exponentiate=TRUE,effects="fixed")
 ```
 
+Figures for SplitFigures
+```{r}
+ggarrange(ggarrange(fig2a, fig2c$figOut,labels=c("A","B")),
+          SVPFhist(dptp1),labels = c("","C"),nrow=2)
+ggsave('figs/fig2_all_exp1.jpg',width=8.29,height=7.00)
+
+ggarrange(ggarrange(fig2b, fig2d$figOut,labels=c("A","B")),
+          SVPFhist(dptp),labels = c("","C"),nrow=2)
+ggsave('figs/fig2_all_exp2.jpg',width=8.29,height=7.00)
+```
 
 # Individual differences in the preference for progress feedback
 H3: People with higher emotional volatility will show greater preference for progress feedback.
@@ -420,8 +418,8 @@ keep4ratings <- sBalanced$prolific_id[sBalanced$cell_n >= 6] #no fewer than six 
 sCheck <- dNoFail %>% group_by(prolific_id,actual_offer,effort_type) %>% 
   summarise(cell_n = n()) #count the number of data points in each cell
 sCheck <- sCheck[sCheck$cell_n>3,]
-s1<-as.data.frame(table(sCheck$prolific_id[sCheck$effort_type=="no-progress"]))
-s2<-as.data.frame(table(sCheck$prolific_id[sCheck$effort_type=="with-progress"]))
+s1<-as.data.frame(table(sCheck$prolific_id[sCheck$effort_type==1]))
+s2<-as.data.frame(table(sCheck$prolific_id[sCheck$effort_type==0]))
 
 #now exclude those with no more than two cells fitting the criteria
 enoughNoProgress<-s1$Var1[s1$Freq>1]
@@ -516,7 +514,7 @@ sumRatings2<-d4p[!d4p$progress_shown,] %>%
   summarize(MeanRating = mean(rating), SE = sd(rating) / sqrt(n()))
 
 ggarrange(
-ggplot(sumRatings, aes(x = effort_level, y = MeanRating,color = prolific_id)) +
+ggplot(sumRatings, aes(x = effort_level+0.3, y = MeanRating,color = prolific_id)) +
   geom_point(alpha=0.1) + geom_line(aes(group = prolific_id),alpha=0.1) +
   stat_summary(aes(group=1),
                fun.data = mean_cl_boot,
@@ -525,12 +523,12 @@ ggplot(sumRatings, aes(x = effort_level, y = MeanRating,color = prolific_id)) +
   labs(title = "PF+", 
        x = "Effort Level", 
        y = "Rating \n (mean-centred)")+
-  scale_x_continuous(limits = c(0.2,1.1))+
+  scale_x_continuous(limits = c(0.65,1.1))+
   scale_y_continuous(limits = c(-0.41,0.5))+#0.86))+
   theme(plot.title = element_text(hjust = 0.5),
         legend.position = "none")+theme(text=element_text(size=14)),
 
-ggplot(sumRatings2, aes(x = effort_level, y = MeanRating,color = prolific_id)) +
+ggplot(sumRatings2, aes(x = effort_level+0.3, y = MeanRating,color = prolific_id)) +
   geom_point(alpha=0.1) + geom_line(aes(group = prolific_id),alpha=0.1) +
   stat_summary(aes(group=1),
                fun.data = mean_cl_boot,
@@ -539,7 +537,7 @@ ggplot(sumRatings2, aes(x = effort_level, y = MeanRating,color = prolific_id)) +
   labs(title = "PF-", 
        x = "Effort Level", 
        y = "Rating \n (mean-centred)")+
-  scale_x_continuous(limits = c(0.2,1.1))+
+  #scale_x_continuous(limits = c(0.45,1.1))+
   scale_y_continuous(limits = c(-0.41,0.5))+#0.86))+
   theme(plot.title = element_text(hjust = 0.5),axis.title.y = element_blank(),
         legend.position = "none")+theme(text=element_text(size=14)),
@@ -551,17 +549,7 @@ ggsave('figs/ratings_main.jpg',width=8.4,height=4.51)
 
 # Sensitivity analysis for H2: include all trials + analyse Fail on effort ratings
 -For the H2 sensitivity analysis above, we will use all trials from all participants and include failure as another fixed effect. Failures might 1) be positively associated with the subjective experience of effort, and/or 2) blunt the sensitivity of effort ratings – this could be reflected in a significant failure-by-workload interaction, where failure trials with different levels of expected physical work are rated more similarly than non-failure trials.
-```{r}
-mega$noProgress<-1
-mega$noProgress[mega$progress_shown]<-0
-mega$effort_type<-mega$noProgress
-mega$failure<-as.numeric(!mega$isGoalReached)
-```
 
-Check: are failures more prevalent in with-progress?
-```{r}
-summary(glmer(isGoalReached~progress_shown+effort_level+(1|prolific_id),mega,family=binomial))
-```
 
 ```{r}
 f1m1 <- lmer(rating~effort_level*effort_type*failure+(1|prolific_id)+(0+effort_level|prolific_id)+(0+effort_type|prolific_id)+(0+failure|prolific_id), mega)
@@ -667,25 +655,6 @@ ggplot(mega, aes(x = trial_in_chain, y = dOffer,color = prolific_id)) +
         legend.position = "none")
 ```
 
-Choices around the zone of convergence
-```{r}
-ggplot(choice_dEff[choice_dEff$dOffer %in% levels2keep,], 
-       aes(x = dOffer, y = pChooseRef,color = prolific_id)) +
-  geom_line(aes(group = prolific_id),
-            #color = "grey",
-            alpha=0.1) +
-  stat_summary(fun = mean,
-               fun.max = function(x) mean(x) + 1.96*sd(x) / sqrt(length(unique(choice_dEff$prolific_id))),
-               fun.min = function(x) mean(x) - 1.96*sd(x) / sqrt(length(unique(choice_dEff$prolific_id))),
-               shape = 21, fill = "white", #this is to make the stat summary hollow
-               size = 0.8,
-               color= "black")+
-  labs(title = "Choice data for offer combinations \n encountered by over 50% of participants", 
-       x = "Difference in effort offered, \n With-Progress-Feedback (PF+) - No-Progress-Feedback (PF-)", 
-       y = "p(Choose PF+)")+
-  theme(plot.title = element_text(hjust = 0.5),
-        legend.position = "none")
-```
 
 For the questionnaire explorations:
 ```{r}
@@ -739,6 +708,20 @@ summary(glmer(!isGoalReached ~ effort_level + (effort_level | prolific_id),
 # Table of descriptive statistics as per editorial request
 -To be in OSM
 ```{r}
+#Exp1
+sT1<-mega1 %>% 
+  group_by(prolific_id, dOffer) %>% 
+  summarize(pChooseRef = mean(ChoseRef==1)) %>% 
+  group_by(dOffer) %>% 
+  summarize(Mean = mean(pChooseRef), SD = sd(pChooseRef)) %>% 
+  filter(!is.na(dOffer) & !is.na(Mean) & !is.na(SD)) %>%
+  rename(`△effort` = dOffer, M = Mean)
+apa_table(
+  sT1,
+  escape = FALSE,
+  format = "docx" # Ensure proper formatting for Word document
+)
+#Exp2
 sT1<-mega %>% 
   group_by(prolific_id, dOffer) %>% 
   summarize(pChooseRef = mean(ChoseRef==1)) %>% 
@@ -746,7 +729,6 @@ sT1<-mega %>%
   summarize(Mean = mean(pChooseRef), SD = sd(pChooseRef)) %>% 
   filter(!is.na(dOffer) & !is.na(Mean) & !is.na(SD)) %>%
   rename(`△effort` = dOffer, M = Mean)
-
 apa_table(
   sT1,
   escape = FALSE,
@@ -755,22 +737,27 @@ apa_table(
 ```
 
 ```{r}
-sT1<-mega %>% 
-  group_by(prolific_id, dOffer) %>% 
-  summarize(pChooseRef = mean(ChoseRef==1)) %>% 
-  group_by(dOffer) %>% 
-  summarize(Mean = mean(pChooseRef), SD = sd(pChooseRef)) %>% 
-  filter(!is.na(dOffer) & !is.na(Mean) & !is.na(SD)) %>%
-  rename(`△effort` = dOffer, M = Mean)
-
+#Exp1
+sT2<-mega1 %>% 
+  group_by(prolific_id,effort_type, effort_level) %>% 
+  summarize(MeanRating = mean(rating)) %>% 
+  group_by(effort_type,effort_level) %>% 
+  summarize(Mean = mean(MeanRating), SD = sd(MeanRating)) %>% 
+  filter(!is.na(effort_level) & !is.na(Mean) & !is.na(SD)) %>%
+  rename(`Effort Level` = effort_level, `Effort Type`=effort_type, M = Mean)
+sT2$`Effort Level`<-sT2$`Effort Level`+0.3
+sT2 <- sT2 %>%
+  mutate(`Effort Type` = case_when(
+    `Effort Type` == 1 ~ "PF-",
+    `Effort Type` == 0 ~ "PF+"
+  ))
 apa_table(
-  sT1,
+  sT2,
   escape = FALSE,
   format = "docx" # Ensure proper formatting for Word document
 )
-```
 
-```{r}
+#Exp2
 sT2<-mega %>% 
   group_by(prolific_id,effort_type, effort_level) %>% 
   summarize(MeanRating = mean(rating)) %>% 
@@ -778,13 +765,12 @@ sT2<-mega %>%
   summarize(Mean = mean(MeanRating), SD = sd(MeanRating)) %>% 
   filter(!is.na(effort_level) & !is.na(Mean) & !is.na(SD)) %>%
   rename(`Effort Level` = effort_level, `Effort Type`=effort_type, M = Mean)
-
+sT2$`Effort Level`<-sT2$`Effort Level`+0.3
 sT2 <- sT2 %>%
   mutate(`Effort Type` = case_when(
-    `Effort Type` == "no-progress" ~ "PF-",
-    `Effort Type` == "with-progress" ~ "PF+"
+    `Effort Type` == 1 ~ "PF-",
+    `Effort Type` == 0 ~ "PF+"
   ))
-
 apa_table(
   sT2,
   escape = FALSE,
@@ -792,7 +778,7 @@ apa_table(
 )
 ```
 
-For participant-level information
+For participant-level information, only in Exp2
 ```{r}
 # Function to convert wide-format data to summary table with mean and SD
 wide2sumtable <- function(data, 
